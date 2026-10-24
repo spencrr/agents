@@ -145,6 +145,25 @@ class InstallerCases:
         self.assertFalse((self.home / ".spencrr-agents").exists())
         self.assertFalse((self.home / ".copilot").exists())
 
+    def test_every_replacement_gets_a_distinct_backup(self):
+        originals = {relative: relative.encode() for relative in TARGETS}
+        for relative, content in originals.items():
+            self.write(relative, content)
+        result = self.run_installer("--agents", "all", "--force")
+        backups = list((self.home / ".spencrr-agents" / "backups").iterdir())
+        self.assertEqual(result.stdout.count("BACKUP "), len(TARGETS))
+        self.assertEqual(len(backups), len(TARGETS))
+        self.assertEqual({backup.read_bytes() for backup in backups}, set(originals.values()))
+        for relative, source in TARGETS.items():
+            self.assertEqual((self.home / relative).read_bytes(), source.read_bytes())
+
+    def test_skill_conflict_is_preflighted_before_any_writes(self):
+        self.write(".claude/skills/python-development/SKILL.md")
+        before = self.snapshot()
+        self.run_installer("--agents", "ghcp,codex,claude", success=False)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse((self.home / ".copilot").exists())
+
     def test_empty_existing_file_is_backed_up(self):
         self.write(".claude/CLAUDE.md", b"")
         self.run_installer("--agents", "claude", success=False)
@@ -213,6 +232,28 @@ class InstallerCases:
         self.assertEqual(list(outside.iterdir()), [])
         self.assertFalse((self.home / ".copilot").exists())
 
+    def test_dangling_symlink_is_rejected(self):
+        outside = self.directory / "missing.md"
+        destination = self.home / ".codex/AGENTS.md"
+        destination.parent.mkdir(parents=True)
+        try:
+            destination.symlink_to(outside)
+        except OSError as error:
+            if os.name == "nt" and error.winerror == 1314:
+                self.skipTest("Creating file symlinks requires Windows Developer Mode or privilege.")
+            raise
+        self.run_installer("--agents", "all", "--force", success=False)
+        self.assertTrue(destination.is_symlink())
+        self.assertFalse(outside.exists())
+        self.assertFalse((self.home / ".copilot").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_replacement_preserves_file_mode(self):
+        target = self.write(".claude/CLAUDE.md")
+        target.chmod(0o640)
+        self.run_installer("--agents", "claude", "--force")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
     def test_environment_home_overrides(self):
         roots = {variable: self.directory / variable.lower() for variable in OVERRIDES}
         for variable, root in roots.items():
@@ -248,18 +289,28 @@ class InstallerCases:
         self.assertFalse(outside.exists())
         self.assertTrue((self.home / ".copilot/copilot-instructions.md").exists())
 
+    def test_relative_environment_override_is_rejected(self):
+        self.env["CODEX_HOME"] = "relative-codex-home"
+        self.run_installer("--agents", "all", explicit_home=False, success=False)
+        self.assertFalse((self.home / ".copilot").exists())
+        self.assertFalse((self.home / ".claude").exists())
+        self.assertFalse((self.home / ".agents").exists())
+
     def test_invalid_input_never_writes(self):
         for arguments in (
             (), ("--agents", "unknown"), ("--agents", "claude,"), ("--agents", ""),
             ("--agents", "all", "--surprise"), ("--agents",),
             ("--agents", "all", "--home", "relative-home"),
+            ("--agents", "__proto__"), ("--agents", "toString"),
+            ("--agents", "Claude"), ("--agents", "ghcp,,codex"),
         ):
             with self.subTest(arguments=arguments):
                 self.run_installer(*arguments, success=False)
                 self.assertFalse(self.home.exists())
 
     def test_help_never_writes(self):
-        self.run_installer("--help")
+        result = self.run_installer("--help")
+        self.assertIn("usage:", result.stdout.lower())
         self.assertFalse(self.home.exists())
 
 
