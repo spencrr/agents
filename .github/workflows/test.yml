@@ -1,0 +1,36 @@
+name: Test installers
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run identical scenarios against all four installers
+        shell: pwsh
+        env:
+          REQUIRE_ALL_INSTALLERS: "1"
+        run: python -m unittest discover -s tests -v
+      - name: Check npm package
+        shell: pwsh
+        run: |
+          npm run check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm pack --dry-run
+          exit $LASTEXITCODE
